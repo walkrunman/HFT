@@ -243,7 +243,8 @@ class StoikovStrategy:
         return trades_list, md_list, updates_list, all_orders
     
 class GStrategy:
-    def __init__(self, delay: float, hold_time:Optional[float]) -> None:
+    def __init__(self, delay: float, T0: np.int64, T1: np.int64, 
+                 hold_time:Optional[float]) -> None:
         '''
             Args:
                 delay(float): delay between orders in nanoseconds
@@ -256,11 +257,14 @@ class GStrategy:
 
         self.size_order = 0.0174
         
-        self.a = 10.64
-        self.b = 0.0004066
+        self.a = 5
+        self.b = 0.0002066
         self.c = 3.246
         
         self.delta = 0.001
+        
+        self.T0 = T0
+        self.T1 = T1
 
     def run(self, sim: Sim ) ->\
         Tuple[ List[OwnTrade], List[MdUpdate], List[ Union[OwnTrade, MdUpdate] ], List[Order] ]:
@@ -328,7 +332,7 @@ class GStrategy:
             if receive_ts - prev_time >= self.delay:
                 prev_time = receive_ts
                 
-                decicion_by_pos = self.make_decision(mid_price, inventory)
+                decicion_by_pos = self.make_decision(mid_price, inventory, receive_ts)
                 
                 if decicion_by_pos == "sell at market":
                     ask_order = sim.place_order( receive_ts, self.size_order, 'ASK', best_ask )
@@ -348,8 +352,6 @@ class GStrategy:
                     ask_order = sim.place_order( receive_ts, self.size_order, 'ASK', best_ask - self.delta)
                     
                 
-                # bid_order = sim.place_order( receive_ts, self.min_pos, 'BID', best_bid )
-                # ask_order = sim.place_order( receive_ts, self.min_pos, 'ASK', best_ask )
                 ongoing_orders[bid_order.order_id] = bid_order
                 ongoing_orders[ask_order.order_id] = ask_order
 
@@ -366,7 +368,8 @@ class GStrategy:
                 
         return trades_list, md_list, updates_list, all_orders
     
-    def right_log(self, S, Y):
+    def right_log(self, S, Y, t):
+        k = 1 + (t-self.T0)/(self.T1-self.T0)
         try:
             if np.isnan(np.sign(S - np.log(self.a*Y))):
                 return 1
@@ -375,33 +378,36 @@ class GStrategy:
         except Exception:
             return 1
     
-    def left_log(self, S, Y):
+    def left_log(self, S, Y, t):
+        k = 1 + (t-self.T0)/(self.T1-self.T0)
         try:
-            if np.isnan(np.sign(S - np.log(-self.a*Y))):
+            if np.isnan(np.sign(S - np.log(-self.a*k*Y))):
                 return 1
             else:
-                return np.sign(S - np.log(-self.a*Y))
+                return np.sign(S - np.log(-self.a*k*Y))
         except Exception:
             return 1
     
-    def right_line(self, S, Y):
-        return S - self.b - self.c*Y
+    def right_line(self, S, Y, t):
+        k = 1 + (t-self.T0)/(self.T1-self.T0)
+        return S - self.b - self.c*k*Y
     
-    def left_line(self, S, Y):
-        return S - self.b + self.c*Y
+    def left_line(self, S, Y, t):
+        k = 1 + (t-self.T0)/(self.T1-self.T0)
+        return S - self.b + self.c*k*Y
     
-    def make_decision(self, S, Y):
-        if self.right_log(S, Y) < 0:
+    def make_decision(self, S, Y, t):
+        if self.right_log(S, Y, t) < 0:
             return "sell at market"
-        elif self.left_log(S, Y) < 0:
+        elif self.left_log(S, Y, t) < 0:
             return "buy at market"
-        elif self.right_line(S, Y) < 0 and self.left_line(S, Y) < 0:
+        elif self.right_line(S, Y, t) < 0 and self.left_line(S, Y, t) < 0:
             return "BaBb"
-        elif self.right_line(S, Y) > 0 and self.left_line(S, Y) > 0:
+        elif self.right_line(S, Y, t) > 0 and self.left_line(S, Y, t) > 0:
             return "Ba-Bb+"
-        elif self.right_line(S, Y) < 0 and self.left_line(S, Y) > 0:
+        elif self.right_line(S, Y, t) < 0 and self.left_line(S, Y, t) > 0:
             return "Ba-Bb"
-        elif self.right_line(S, Y) > 0 and self.left_line(S, Y) < 0:
+        elif self.right_line(S, Y, t) > 0 and self.left_line(S, Y, t) < 0:
             return "BaBb+"
         
 if __name__ == "__main__":
@@ -429,7 +435,9 @@ if __name__ == "__main__":
 
     hold_time = pd.Timedelta(10, 's').delta
     
-    strategy = GStrategy(delay, hold_time)
+    T0 = 1655942402250125991
+    T1 = 1655976252046013863
+    strategy = GStrategy(delay, T0, T1, hold_time)
     trades_list, md_list, updates_list, all_orders = strategy.run(sim)
     
     # S = 0
@@ -447,4 +455,3 @@ if __name__ == "__main__":
     plt.title("BestStrategy PnL", fontsize=15)
     plt.grid()
     plt.show()
-
