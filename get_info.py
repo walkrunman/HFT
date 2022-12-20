@@ -6,7 +6,7 @@ import pandas as pd
 from simulator import MdUpdate, OwnTrade, update_best_positions
 
 
-def get_pnl(updates_list:List[ Union[MdUpdate, OwnTrade] ]) -> pd.DataFrame:
+def get_pnl(updates_list:List[ Union[MdUpdate, OwnTrade] ], cost=-0.00001) -> pd.DataFrame:
     '''
         This function calculates PnL from list of updates
     '''
@@ -18,6 +18,7 @@ def get_pnl(updates_list:List[ Union[MdUpdate, OwnTrade] ]) -> pd.DataFrame:
     btc_pos_arr = np.zeros((N, ))
     usd_pos_arr = np.zeros((N, ))
     mid_price_arr = np.zeros((N, ))
+
     #current best_bid and best_ask
     best_bid:float = -np.inf
     best_ask:float = np.inf
@@ -39,6 +40,7 @@ def get_pnl(updates_list:List[ Union[MdUpdate, OwnTrade] ]) -> pd.DataFrame:
             elif trade.side == 'ASK':
                 btc_pos -= trade.size
                 usd_pos += trade.price * trade.size
+            usd_pos -= cost * trade.price * trade.size
         #current portfolio value
         
         btc_pos_arr[i] = btc_pos
@@ -51,7 +53,7 @@ def get_pnl(updates_list:List[ Union[MdUpdate, OwnTrade] ]) -> pd.DataFrame:
     
     df = pd.DataFrame({"exchange_ts": exchange_ts, "receive_ts":receive_ts, "total":worth_arr, "BTC":btc_pos_arr, 
                        "USD":usd_pos_arr, "mid_price":mid_price_arr})
-    df = df.groupby('receive_ts').agg(lambda x: x.iloc[-1]).reset_index()    
+    #df = df.groupby('receive_ts').agg(lambda x: x.iloc[-1]).reset_index()    
     return df
 
 

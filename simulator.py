@@ -5,68 +5,8 @@ from typing import List, Optional, Tuple, Union, Deque, Dict
 import numpy as np
 from sortedcontainers import SortedDict
 
-
-@dataclass
-class Order:  # Our own placed order
-    place_ts : float # ts when we place the order
-    exchange_ts : float # ts when exchange(simulator) get the order    
-    order_id: int
-    side: str
-    size: float
-    price: float
-
-        
-@dataclass
-class CancelOrder:
-    exchange_ts: float
-    id_to_delete : int
-
-@dataclass
-class AnonTrade:  # Market trade
-    exchange_ts : float
-    receive_ts : float
-    side: str
-    size: float
-    price: float
-
-
-@dataclass
-class OwnTrade:  # Execution of own placed order
-    place_ts : float # ts when we call place_order method, for debugging
-    exchange_ts: float
-    receive_ts: float
-    trade_id: int
-    order_id: int
-    side: str
-    size: float
-    price: float
-    execute : str # BOOK or TRADE
-
-
-    def __post_init__(self):
-        assert isinstance(self.side, str)
-
-@dataclass
-class OrderbookSnapshotUpdate:  # Orderbook tick snapshot
-    exchange_ts : float
-    receive_ts : float
-    asks: List[Tuple[float, float]]  # tuple[price, size]
-    bids: List[Tuple[float, float]]
-
-
-@dataclass
-class MdUpdate:  # Data of a tick
-    exchange_ts : float
-    receive_ts : float
-    orderbook: Optional[OrderbookSnapshotUpdate] = None
-    trade: Optional[AnonTrade] = None
-
-
-def update_best_positions(best_bid:float, best_ask:float, md:MdUpdate) -> Tuple[float, float]:
-    if not md.orderbook is None:
-        best_bid = md.orderbook.bids[0][0]
-        best_ask = md.orderbook.asks[0][0]
-    return best_bid, best_ask
+from utils import Order, CancelOrder, AnonTrade, OwnTrade, OrderbookSnapshotUpdate, MarketOrder, \
+                  MdUpdate, update_best_positions, get_mid_price, PriorQueue
 
 
 class Sim:
@@ -80,9 +20,9 @@ class Sim:
         #transform md to queue
         self.md_queue = deque( market_data )
         #action queue
-        self.actions_queue:Deque[ Union[Order, CancelOrder] ] = deque()
+        self.actions_queue:Deque[ Union[Order, MarketOrder, CancelOrder] ] = deque()
         #SordetDict: receive_ts -> [updates]
-        self.strategy_updates_queue = SortedDict()
+        self.strategy_updates_queue = PriorQueue()
         #map : order_id -> Order
         self.ready_to_execute_orders:Dict[int, Order] = {}
         
@@ -114,7 +54,7 @@ class Sim:
     
     
     def get_strategy_updates_queue_event_time(self) -> np.float:
-        return np.inf if len(self.strategy_updates_queue) == 0 else self.strategy_updates_queue.keys()[0]
+        return self.strategy_updates_queue.min_key()
     
     
     def get_order_id(self) -> int:
@@ -127,13 +67,6 @@ class Sim:
         res = self.trade_id
         self.trade_id += 1
         return res
-    
-
-    def update_best_pos(self) -> None:
-        assert not self.md is None, "no current market data!" 
-        if not self.md.orderbook is None:
-            self.best_bid = self.md.orderbook.bids[0][0]
-            self.best_ask = self.md.orderbook.asks[0][0]
     
     
     def update_last_trade(self) -> None:
@@ -151,14 +84,12 @@ class Sim:
         #current orderbook
         self.md = md 
         #update position
-        self.update_best_pos()
+        self.best_bid, self.best_ask = update_best_positions(self.best_bid, self.best_ask, md)
         #update info about last trade
         self.update_last_trade()
 
         #add md to strategy_updates_queue
-        if not md.receive_ts in self.strategy_updates_queue.keys():
-            self.strategy_updates_queue[md.receive_ts] = []
-        self.strategy_updates_queue[md.receive_ts].append(md)
+        self.strategy_updates_queue.push(md.receive_ts, md)
         
     
     def update_action(self, action:Union[Order, CancelOrder]) -> None:
@@ -171,6 +102,14 @@ class Sim:
             #cancel order
             if action.id_to_delete in self.ready_to_execute_orders:
                 self.ready_to_execute_orders.pop(action.id_to_delete)
+        elif isinstance(action, MarketOrder):
+            price = self.best_bid if action.side == 'ASK' else self.best_ask
+            self.last_order = Order( action.place_ts, 
+                                     action.exchange_ts, 
+                                     action.order_id, 
+                                     action.side, 
+                                     action.size, 
+                                     price)
         else:
             assert False, "Wrong action type!"
 
@@ -178,7 +117,6 @@ class Sim:
     def tick(self) -> Tuple[ float, List[ Union[OwnTrade, MdUpdate] ] ]:
         '''
             Simulation tick
-
             Returns:
                 receive_ts(float): receive timestamp in nanoseconds
                 res(List[Union[OwnTrade, MdUpdate]]): simulation result. 
@@ -197,23 +135,20 @@ class Sim:
             if strategy_updates_queue_et < min(md_queue_et, actions_queue_et):
                 break
 
-
+            call_execute = md_queue_et <= actions_queue_et
             if md_queue_et <= actions_queue_et:
                 self.update_md( self.md_queue.popleft() )
             if actions_queue_et <= md_queue_et:
                 self.update_action( self.actions_queue.popleft() )
-
-            #execute last order aggressively
-            self.execute_last_order()
+                #execute last order aggressively
+                self.execute_last_order()
+            
             #execute orders with current orderbook
-            self.execute_orders()
+            if call_execute:
+                self.execute_orders()
             #delete last trade
             self.delete_last_trade()
-        #end of simulation
-        if len(self.strategy_updates_queue) == 0:
-            return np.inf, None
-        key = self.strategy_updates_queue.keys()[0]
-        res = self.strategy_updates_queue.pop(key)
+        key, res = self.strategy_updates_queue.pop()
         return key, res
 
 
@@ -246,10 +181,7 @@ class Sim:
                 self.last_order.size, 
                 executed_price, execute)
             #add order to strategy update queue
-            #there is no defaultsorteddict so I have to do this
-            if not executed_order.receive_ts in self.strategy_updates_queue:
-                self.strategy_updates_queue[ executed_order.receive_ts ] = []
-            self.strategy_updates_queue[ executed_order.receive_ts ].append(executed_order)
+            self.strategy_updates_queue.push(executed_order.receive_ts, executed_order)
         else:
             self.ready_to_execute_orders[self.last_order.order_id] = self.last_order
 
@@ -290,11 +222,8 @@ class Sim:
         
                 executed_orders_id.append(order_id)
 
-                #added order to strategy update queue
-                #there is no defaultsorteddict so i have to do this
-                if not executed_order.receive_ts in self.strategy_updates_queue:
-                    self.strategy_updates_queue[ executed_order.receive_ts ] = []
-                self.strategy_updates_queue[ executed_order.receive_ts ].append(executed_order)
+                #add order to strategy update queue
+                self.strategy_updates_queue.push(executed_order.receive_ts, executed_order)
         
         #deleting executed orders
         for k in executed_orders_id:
@@ -306,6 +235,12 @@ class Sim:
         order = Order(ts, ts + self.latency, self.get_order_id(), side, size, price)
         self.actions_queue.append(order)
         return order
+
+
+    def place_market_order(self, ts, size, side) -> None:
+        market_order = MarketOrder(ts, ts + self.latency, self.get_order_id(), side, size)
+        pass
+    
 
     
     def cancel_order(self, ts:float, id_to_delete:int) -> CancelOrder:
